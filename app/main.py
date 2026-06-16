@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, Response
 
 from app.config import get_settings
 from app.pipeline import VoicePipeline
+from app.utils.audio import normalize_wav_bytes
 
 settings = get_settings()
 app = FastAPI(title="Pipecat Vast Voice Stack", version="0.1.0")
@@ -83,3 +86,71 @@ async def chat_completions_passthrough(payload: dict) -> dict:
 async def speech_passthrough(payload: dict) -> Response:
     result = await pipeline.tts.synthesize(payload.get("input", ""), voice=payload.get("voice"))
     return Response(content=result.audio, media_type="audio/wav")
+
+
+@app.websocket("/v1/voice-turn/ws")
+async def voice_turn_ws(websocket: WebSocket):
+    await websocket.accept()
+    total_start = time.perf_counter()
+    try:
+        start = json.loads(await websocket.receive_text())
+        if start.get("type") != "start":
+            await websocket.send_json({"type": "error", "message": "first message must be start"})
+            return
+        await websocket.send_json({"type": "ready"})
+
+        audio = await websocket.receive_bytes()
+        end = json.loads(await websocket.receive_text())
+        if end.get("type") != "end":
+            await websocket.send_json({"type": "error", "message": "expected end after audio bytes"})
+            return
+
+        await websocket.send_json({"type": "stt_start"})
+        stt_start = time.perf_counter()
+        normalized = normalize_wav_bytes(audio)
+        stt_result = await pipeline.stt.transcribe(normalized, filename=start.get("filename") or "input.wav")
+        stt_ms = int((time.perf_counter() - stt_start) * 1000)
+        await websocket.send_json({"type": "transcript", "text": stt_result.text, "elapsed_ms": stt_ms})
+
+        await websocket.send_json({"type": "llm_start"})
+        llm_start = time.perf_counter()
+        first_token_ms = None
+        chunks = []
+        async for token in pipeline.brain.stream_complete(stt_result.text, prompt_preamble=start.get("prompt_preamble")):
+            if first_token_ms is None:
+                first_token_ms = int((time.perf_counter() - llm_start) * 1000)
+            chunks.append(token)
+            await websocket.send_json({"type": "llm_token", "text": token})
+        assistant_text = "".join(chunks).strip()
+        llm_total_ms = int((time.perf_counter() - llm_start) * 1000)
+        await websocket.send_json(
+            {
+                "type": "llm_done",
+                "text": assistant_text,
+                "first_token_ms": first_token_ms or llm_total_ms,
+                "total_ms": llm_total_ms,
+            }
+        )
+
+        await websocket.send_json({"type": "tts_start"})
+        tts_result = await pipeline.tts.synthesize(assistant_text, voice=start.get("voice"))
+        await websocket.send_json({"type": "audio_start", "mime_type": "audio/wav"})
+        await websocket.send_bytes(tts_result.audio)
+        await websocket.send_json({"type": "audio_done", "bytes": len(tts_result.audio), "elapsed_ms": tts_result.total_ms})
+
+        await websocket.send_json(
+            {
+                "type": "done",
+                "timings": {
+                    "stt_ms": stt_ms,
+                    "llm_first_token_ms": first_token_ms or llm_total_ms,
+                    "llm_total_ms": llm_total_ms,
+                    "tts_total_ms": tts_result.total_ms,
+                    "total_ms": int((time.perf_counter() - total_start) * 1000),
+                },
+            }
+        )
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
