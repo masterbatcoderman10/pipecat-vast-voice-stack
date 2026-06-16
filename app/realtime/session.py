@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from typing import Any
@@ -11,7 +12,8 @@ from app.realtime.protocol import error, event
 from app.realtime.stt_stream import StreamingSttAdapter
 from app.realtime.text_segmenter import TextSegmenter
 from app.realtime.tts_stream import StreamingTtsAdapter
-from app.realtime.vad import EnergyVadAdapter
+from app.realtime.vad import create_vad_adapter
+from app.services.brain_client import BrainClient
 
 
 class RealtimeSession:
@@ -33,8 +35,10 @@ class RealtimeSession:
         self._audio_bytes = 0
         self._session_started_at = time.perf_counter()
         self._first_audio_ms: int | None = None
-        self.vad = EnergyVadAdapter()
-        self.stt = StreamingSttAdapter(mode="mock" if settings.mock_mode else "local")
+        self.vad = create_vad_adapter(mock_mode=settings.mock_mode, sample_rate=self.sample_rate)
+        stt_mode = "mock" if settings.mock_mode else "live"
+        self.stt = StreamingSttAdapter(mode=stt_mode, stt_url=settings.stt_url)
+        self.brain = BrainClient(settings)
 
     async def run(self) -> None:
         await self.websocket.accept()
@@ -79,29 +83,42 @@ class RealtimeSession:
             if message.get("type") == "websocket.disconnect":
                 return
 
+    @staticmethod
+    async def _maybe_await(value):
+        if inspect.isawaitable(value):
+            return await value
+        return value
+
     async def _handle_audio(self, chunk: bytes) -> None:
         if not chunk:
             return
         self._audio_bytes += len(chunk)
-        for vad_event in self.vad.feed_pcm(chunk):
+        for vad_event in await self._maybe_await(self.vad.feed_pcm(chunk)):
             await self.websocket.send_json(
                 event(f"vad.{vad_event}", session_id=self.session_id, audio_bytes=self._audio_bytes)
             )
-        self.stt.feed_pcm(chunk)
+        for partial in await self.stt.feed_pcm(chunk):
+            await self.websocket.send_json(
+                event(
+                    "stt.final" if partial.is_final else "stt.partial",
+                    session_id=self.session_id,
+                    text=partial.text,
+                )
+            )
 
     async def _handle_commit(self) -> None:
-        for vad_event in self.vad.commit():
+        for vad_event in await self._maybe_await(self.vad.commit()):
             await self.websocket.send_json(
                 event(f"vad.{vad_event}", session_id=self.session_id, audio_bytes=self._audio_bytes)
             )
 
-        transcript = self.stt.commit().text
+        transcript = (await self.stt.commit()).text
         await self.websocket.send_json(event("stt.final", session_id=self.session_id, text=transcript))
         await self.websocket.send_json(event("llm.start", session_id=self.session_id))
 
         segmenter = TextSegmenter(max_chars=80)
         segments: list[str] = []
-        for token in ["Mock realtime ", "response."]:
+        async for token in self.brain.stream_complete(transcript, prompt_preamble="Reply briefly and conversationally."):
             await self.websocket.send_json(event("llm.token", session_id=self.session_id, text=token))
             for segment in segmenter.feed(token):
                 segments.append(segment)
@@ -140,5 +157,5 @@ class RealtimeSession:
 
     async def _handle_cancel(self) -> None:
         self.vad.reset()
-        self.stt.reset()
+        await self.stt.cancel()
         await self.websocket.send_json(event("response.cancelled", session_id=self.session_id))

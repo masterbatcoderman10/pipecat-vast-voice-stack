@@ -19,7 +19,7 @@ WORKDIR /opt/voice-stack
 COPY requirements.txt ./
 RUN python3 -m pip install --upgrade pip \
     && python3 -m pip install -r requirements.txt \
-    && python3 -m pip install "nemo_toolkit[asr]" omnivoice-server pipecat-ai soundfile
+    && python3 -m pip install "nemo_toolkit[asr]" omnivoice-server soundfile
 COPY app ./app
 COPY services ./services
 COPY scripts ./scripts

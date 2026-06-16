@@ -51,21 +51,17 @@ def test_realtime_websocket_mock_contract(monkeypatch, tmp_path):
                 binary_indices.append(len(text_events))
 
     event_types = [event["type"] for event in text_events]
-    expected = [
+    assert event_types[:6] == [
         "session.ready",
         "vad.speech_start",
+        "stt.partial",
         "vad.speech_stop",
         "stt.final",
         "llm.start",
-        "llm.token",
-        "llm.token",
-        "llm.segment",
-        "tts.start",
-        "tts.audio_start",
-        "tts.audio_done",
-        "response.done",
     ]
-    assert event_types == expected
+    assert event_types.count("llm.token") > 2
+    assert "llm.segment" in event_types
+    assert event_types[-4:] == ["tts.start", "tts.audio_start", "tts.audio_done", "response.done"]
 
     audio_start_index = event_types.index("tts.audio_start") + 1
     done_index = event_types.index("response.done")
@@ -96,6 +92,7 @@ def test_realtime_websocket_response_cancel(monkeypatch, tmp_path):
 
         ws.send_bytes(b"\x01\x00" * 320)
         assert ws.receive_json()["type"] == "vad.speech_start"
+        assert ws.receive_json()["type"] == "stt.partial"
         ws.send_text(json.dumps({"type": "response.cancel"}))
 
         cancelled = ws.receive_json()
@@ -134,6 +131,8 @@ def test_realtime_health_contract_live_tts_uses_omnivoice_pcm(monkeypatch, tmp_p
 
     assert response.status_code == 200
     body = response.json()
+    assert body["vad"] == "pipecat/silero"
+    assert body["stt_streaming"] == "nemotron/ws-cache-aware"
     assert body["tts_streaming"] == "omnivoice/sentence-pcm"
     assert body["audio_output"] == "audio/pcm;rate=24000;channels=1;encoding=pcm_s16le"
     assert body["mock_mode"] is False

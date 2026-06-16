@@ -56,8 +56,8 @@ def realtime_health() -> dict:
     mode = "mock" if settings.mock_mode else "local"
     return {
         "status": "ok",
-        "vad": f"energy/{mode}",
-        "stt_streaming": f"{mode}/local",
+        "vad": "energy/mock" if settings.mock_mode else "pipecat/silero",
+        "stt_streaming": "mock/local" if settings.mock_mode else "nemotron/ws-cache-aware",
         "llm_streaming": f"{mode}/local",
         "tts_streaming": "mock/sentence" if settings.mock_mode else "omnivoice/sentence-pcm",
         "audio_input": "pcm_s16le/16000/mono",
