@@ -3,6 +3,7 @@ import json
 
 from fastapi.testclient import TestClient
 
+from app.main import ThinkFilter
 from app.utils.audio import validate_wav_bytes
 
 
@@ -12,6 +13,14 @@ def make_client(monkeypatch, tmp_path):
     import app.main as main
     importlib.reload(main)
     return TestClient(main.app)
+
+
+def test_think_filter_hides_reasoning():
+    f = ThinkFilter()
+    assert f.feed("<think>") == ""
+    assert f.feed("private") == ""
+    assert f.feed("</think>Hi") == "Hi"
+    assert f.feed(" there") == " there"
 
 
 def test_voice_turn_websocket_contract(monkeypatch, tmp_path):

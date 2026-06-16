@@ -17,6 +17,34 @@ app = FastAPI(title="Pipecat Vast Voice Stack", version="0.1.0")
 pipeline = VoicePipeline(settings)
 
 
+class ThinkFilter:
+    def __init__(self):
+        self.hidden = False
+        self.buffer = ""
+
+    def feed(self, token: str) -> str:
+        self.buffer += token
+        visible = []
+        while self.buffer:
+            if self.hidden:
+                end = self.buffer.find("</think>")
+                if end < 0:
+                    self.buffer = ""
+                    break
+                self.buffer = self.buffer[end + len("</think>") :]
+                self.hidden = False
+                continue
+            start = self.buffer.find("<think>")
+            if start < 0:
+                visible.append(self.buffer)
+                self.buffer = ""
+                break
+            visible.append(self.buffer[:start])
+            self.buffer = self.buffer[start + len("<think>") :]
+            self.hidden = True
+        return "".join(visible)
+
+
 @app.get("/health")
 def health() -> dict:
     return {"status": "ok", "mock_mode": settings.mock_mode, "artifact_dir": str(settings.artifact_dir)}
@@ -115,13 +143,17 @@ async def voice_turn_ws(websocket: WebSocket):
         await websocket.send_json({"type": "llm_start"})
         llm_start = time.perf_counter()
         first_token_ms = None
-        chunks = []
+        visible_chunks = []
+        think_filter = ThinkFilter()
         async for token in pipeline.brain.stream_complete(stt_result.text, prompt_preamble=start.get("prompt_preamble")):
+            visible_token = think_filter.feed(token)
+            if not visible_token:
+                continue
             if first_token_ms is None:
                 first_token_ms = int((time.perf_counter() - llm_start) * 1000)
-            chunks.append(token)
-            await websocket.send_json({"type": "llm_token", "text": token})
-        assistant_text = "".join(chunks).strip()
+            visible_chunks.append(visible_token)
+            await websocket.send_json({"type": "llm_token", "text": visible_token})
+        assistant_text = "".join(visible_chunks).strip()
         llm_total_ms = int((time.perf_counter() - llm_start) * 1000)
         await websocket.send_json(
             {
