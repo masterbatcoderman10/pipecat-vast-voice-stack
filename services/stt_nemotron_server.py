@@ -86,7 +86,7 @@ def _transcribe_pcm_with_nemotron(pcm: bytes, *, sample_rate: int, channels: int
                     return _result_text(method([str(path)]))
                 finally:
                     path.unlink(missing_ok=True)
-            except TypeError:
+            except (TypeError, NotImplementedError):
                 continue
 
     path = _pcm_to_wav_path(pcm, sample_rate=sample_rate, channels=channels)

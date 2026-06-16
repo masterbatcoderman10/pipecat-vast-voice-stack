@@ -78,6 +78,9 @@ class PipecatSileroVadAdapter:
             sample_rate=sample_rate,
             params=VADParams(confidence=0.7, start_secs=0.2, stop_secs=0.2, min_volume=0.6),
         )
+        # Pipecat 1.3.0 only initializes internal frame counters/state from
+        # set_sample_rate() / set_params(), not from the constructor args.
+        self.analyzer.set_sample_rate(sample_rate)
 
     async def feed_pcm(self, pcm: bytes) -> list[str]:
         if not pcm:
