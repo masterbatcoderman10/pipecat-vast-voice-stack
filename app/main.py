@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, Response
 
 from app.config import get_settings
 from app.pipeline import VoicePipeline
+from app.realtime.session import RealtimeSession
 from app.utils.audio import normalize_audio_bytes
 
 settings = get_settings()
@@ -114,6 +115,11 @@ async def chat_completions_passthrough(payload: dict) -> dict:
 async def speech_passthrough(payload: dict) -> Response:
     result = await pipeline.tts.synthesize(payload.get("input", ""), voice=payload.get("voice"))
     return Response(content=result.audio, media_type="audio/wav")
+
+
+@app.websocket("/v2/realtime/ws")
+async def realtime_ws(websocket: WebSocket):
+    await RealtimeSession(websocket, settings).run()
 
 
 @app.websocket("/v1/voice-turn/ws")
