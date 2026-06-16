@@ -37,6 +37,8 @@ MOCK_MODE=1 BASE_URL=http://127.0.0.1:7860 scripts/smoke_vast_audio.sh tests/fix
 
 Live Vast A6000 validation and Sylens clone setup are documented in [`docs/vast-live-voice-note-run.md`](docs/vast-live-voice-note-run.md).
 
+- Streaming token UI plan/docs: [`docs/streaming-frontend.md`](docs/streaming-frontend.md)
+
 Do not rent Vast until the image is built and published. Helper scripts are present but guarded where they would create/destroy paid resources.
 
 - Build only: `scripts/build_image.sh`
