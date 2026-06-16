@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, Response
 
 from app.config import get_settings
 from app.pipeline import VoicePipeline
-from app.utils.audio import normalize_wav_bytes
+from app.utils.audio import normalize_audio_bytes
 
 settings = get_settings()
 app = FastAPI(title="Pipecat Vast Voice Stack", version="0.1.0")
@@ -135,8 +135,8 @@ async def voice_turn_ws(websocket: WebSocket):
 
         await websocket.send_json({"type": "stt_start"})
         stt_start = time.perf_counter()
-        normalized = normalize_wav_bytes(audio)
-        stt_result = await pipeline.stt.transcribe(normalized, filename=start.get("filename") or "input.wav")
+        normalized = normalize_audio_bytes(audio, mime_type=start.get("mime_type"))
+        stt_result = await pipeline.stt.transcribe(normalized, filename="input.wav")
         stt_ms = int((time.perf_counter() - stt_start) * 1000)
         await websocket.send_json({"type": "transcript", "text": stt_result.text, "elapsed_ms": stt_ms})
 

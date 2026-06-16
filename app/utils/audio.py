@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import math
+import shutil
+import subprocess
 import wave
 from pathlib import Path
 from typing import Union
@@ -76,11 +78,49 @@ def read_wav_file(path: Union[str, Path]) -> bytes:
 
 
 def normalize_wav_bytes(data: bytes) -> bytes:
-    """Validate WAV and return bytes.
-
-    This minimal local-safe implementation avoids ffmpeg/soundfile dependency during
-    mock tests. The production container installs ffmpeg/libsndfile for later richer
-    normalization.
-    """
+    """Validate WAV and return bytes."""
     validate_wav_bytes(data)
     return data
+
+
+def normalize_audio_bytes(data: bytes, *, mime_type: str | None = None) -> bytes:
+    """Return STT-safe 16k mono WAV bytes for browser or WAV input.
+
+    Browser MediaRecorder usually emits WebM/Opus, not RIFF/WAV. Keep the
+    existing fast path for WAV and use ffmpeg only when the payload is another
+    container/codec.
+    """
+    if data.startswith(b"RIFF"):
+        return normalize_wav_bytes(data)
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise AudioError("ffmpeg is required to transcode browser audio to wav")
+
+    proc = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-ac",
+            "1",
+            "-ar",
+            str(DEFAULT_SAMPLE_RATE),
+            "-f",
+            "wav",
+            "pipe:1",
+        ],
+        input=data,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.decode(errors="replace").strip() or "unknown ffmpeg error"
+        suffix = f" ({mime_type})" if mime_type else ""
+        raise AudioError(f"could not transcode audio{suffix}: {detail}")
+    validate_wav_bytes(proc.stdout)
+    return proc.stdout
