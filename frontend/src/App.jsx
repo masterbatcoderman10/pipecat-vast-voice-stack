@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { reduceEvent } from './protocol.js';
-import { createAudioWorkletStreamer, nextRealtimeWsUrl, RealtimeVoiceClient } from './realtimeClient.js';
+import { createAudioWorkletStreamer, nextRealtimeWsUrl, PcmPlaybackQueue, RealtimeVoiceClient } from './realtimeClient.js';
 
 const legacyWsUrl = import.meta.env.VITE_BACKEND_WS || 'ws://127.0.0.1:7860/v1/voice-turn/ws';
 const realtimeWsUrl = nextRealtimeWsUrl(import.meta.env.VITE_BACKEND_WS);
@@ -23,6 +23,7 @@ export default function App() {
   const realtimeStream = useRef(null);
   const realtimeStreamer = useRef(null);
   const realtimeAudioContext = useRef(null);
+  const realtimePlayback = useRef(null);
   const [state, setState] = useState(initialState);
   const [audioUrl, setAudioUrl] = useState(null);
   const [realtimeAudioUrls, setRealtimeAudioUrls] = useState([]);
@@ -32,6 +33,10 @@ export default function App() {
   function resetAudio() {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     realtimeAudioUrls.forEach((url) => URL.revokeObjectURL(url));
+    realtimePlayback.current?.stop();
+    realtimePlayback.current = null;
+    realtimeAudioContext.current?.close?.();
+    realtimeAudioContext.current = null;
     setAudioUrl(null);
     setRealtimeAudioUrls([]);
   }
@@ -60,6 +65,9 @@ export default function App() {
         url: realtimeWsUrl,
         voice,
         onEvent: (event) => {
+          if (event.type === 'tts.audio_start' && event.encoding === 'pcm_s16le') {
+            realtimePlayback.current?.configure(event);
+          }
           setState((current) => reduceEvent(current, event));
           if (event.type === 'response.done' || event.type === 'error') {
             cleanupRealtimeInput();
@@ -67,9 +75,7 @@ export default function App() {
           }
         },
         onAudio: (data) => {
-          const blob = new Blob([data], { type: 'audio/wav' });
-          const url = URL.createObjectURL(blob);
-          setRealtimeAudioUrls((current) => [...current, url]);
+          realtimePlayback.current?.enqueue(data);
         },
         onError: () => {
           setState((current) => ({ ...current, status: 'error', error: 'websocket failed' }));
@@ -78,6 +84,7 @@ export default function App() {
 
       realtimeStream.current = stream;
       realtimeAudioContext.current = audioContext;
+      realtimePlayback.current = new PcmPlaybackQueue({ audioContext, sampleRate: 24000, channels: 1 });
       realtimeClient.current = client;
       await client.connect();
       realtimeStreamer.current = await createAudioWorkletStreamer({
@@ -101,6 +108,7 @@ export default function App() {
 
   function cancelRealtime() {
     cleanupRealtimeInput();
+    realtimePlayback.current?.stop();
     realtimeClient.current?.cancel();
     realtimeClient.current?.close();
     setState((current) => reduceEvent(current, { type: 'response.cancelled' }));
@@ -111,8 +119,6 @@ export default function App() {
     realtimeStreamer.current = null;
     realtimeStream.current?.getTracks().forEach((track) => track.stop());
     realtimeStream.current = null;
-    realtimeAudioContext.current?.close?.();
-    realtimeAudioContext.current = null;
   }
 
   async function startLegacy() {

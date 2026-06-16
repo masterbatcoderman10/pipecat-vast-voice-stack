@@ -19,6 +19,66 @@ export function float32ToPcm16(samples) {
   return buffer;
 }
 
+export function pcm16ToFloat32(pcm) {
+  const buffer = pcm instanceof ArrayBuffer
+    ? pcm
+    : pcm.buffer.slice(pcm.byteOffset, pcm.byteOffset + pcm.byteLength);
+  const view = new DataView(buffer);
+  const samples = new Float32Array(Math.floor(view.byteLength / 2));
+  for (let index = 0; index < samples.length; index += 1) {
+    const value = view.getInt16(index * 2, true);
+    samples[index] = value < 0 ? value / 0x8000 : value / 0x7fff;
+  }
+  return samples;
+}
+
+export class PcmPlaybackQueue {
+  constructor({ audioContext, sampleRate = 24000, channels = 1 } = {}) {
+    const AudioContextCtor = globalThis.AudioContext || globalThis.webkitAudioContext;
+    this.audioContext = audioContext || (AudioContextCtor ? new AudioContextCtor({ sampleRate }) : null);
+    if (!this.audioContext) throw new Error('AudioContext is not available');
+    this.sampleRate = sampleRate;
+    this.channels = channels;
+    this.encoding = 'pcm_s16le';
+    this.nextStartTime = 0;
+    this.sources = new Set();
+  }
+
+  configure({ sample_rate, sampleRate, channels, encoding } = {}) {
+    this.sampleRate = sample_rate || sampleRate || this.sampleRate;
+    this.channels = channels || this.channels;
+    this.encoding = encoding || this.encoding;
+  }
+
+  enqueue(pcm) {
+    if (!pcm || pcm.byteLength === 0) return null;
+    if (this.encoding !== 'pcm_s16le') throw new Error(`unsupported PCM encoding: ${this.encoding}`);
+    if (this.channels !== 1) throw new Error(`unsupported PCM channels: ${this.channels}`);
+
+    const samples = pcm16ToFloat32(pcm);
+    const audioBuffer = this.audioContext.createBuffer(1, samples.length, this.sampleRate);
+    audioBuffer.getChannelData(0).set(samples);
+
+    const source = this.audioContext.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(this.audioContext.destination);
+    const startAt = Math.max(this.audioContext.currentTime, this.nextStartTime || 0);
+    source.start(startAt);
+    source.onended = () => this.sources.delete(source);
+    this.sources.add(source);
+    this.nextStartTime = startAt + (samples.length / this.sampleRate);
+    return source;
+  }
+
+  stop() {
+    for (const source of this.sources) {
+      try { source.stop(); } catch { /* already stopped */ }
+    }
+    this.sources.clear();
+    this.nextStartTime = this.audioContext.currentTime;
+  }
+}
+
 export function buildSessionStart({ voice = 'clone:sylens', session_id } = {}) {
   return {
     type: 'session.start',

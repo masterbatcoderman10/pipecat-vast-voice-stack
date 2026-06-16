@@ -59,9 +59,9 @@ def realtime_health() -> dict:
         "vad": f"energy/{mode}",
         "stt_streaming": f"{mode}/local",
         "llm_streaming": f"{mode}/local",
-        "tts_streaming": f"{mode}/sentence",
+        "tts_streaming": "mock/sentence" if settings.mock_mode else "omnivoice/sentence-pcm",
         "audio_input": "pcm_s16le/16000/mono",
-        "audio_output": "audio/wav/mock-tone" if settings.mock_mode else "audio/wav/local",
+        "audio_output": "audio/wav/mock-tone" if settings.mock_mode else "audio/pcm;rate=24000;channels=1;encoding=pcm_s16le",
         "mock_mode": settings.mock_mode,
     }
 

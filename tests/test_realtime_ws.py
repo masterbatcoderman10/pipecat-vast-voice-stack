@@ -120,3 +120,20 @@ def test_realtime_health_contract(monkeypatch, tmp_path):
         "audio_output": "audio/wav/mock-tone",
         "mock_mode": True,
     }
+
+
+def test_realtime_health_contract_live_tts_uses_omnivoice_pcm(monkeypatch, tmp_path):
+    monkeypatch.setenv("MOCK_MODE", "0")
+    monkeypatch.setenv("ARTIFACT_DIR", str(tmp_path))
+    import app.main as main
+
+    importlib.reload(main)
+    client = TestClient(main.app)
+
+    response = client.get("/health/realtime")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tts_streaming"] == "omnivoice/sentence-pcm"
+    assert body["audio_output"] == "audio/pcm;rate=24000;channels=1;encoding=pcm_s16le"
+    assert body["mock_mode"] is False

@@ -45,17 +45,8 @@ class RealtimeSession:
                 return
 
             self._configure(start)
-            if not self.settings.mock_mode:
-                await self.websocket.send_json(
-                    error(
-                        "realtime live mode not implemented",
-                        session_id=self.session_id,
-                        mode="live",
-                    )
-                )
-                return
-
-            await self.websocket.send_json(event("session.ready", session_id=self.session_id, mode="mock"))
+            mode = "mock" if self.settings.mock_mode else "live"
+            await self.websocket.send_json(event("session.ready", session_id=self.session_id, mode=mode))
             await self._run_mock_loop()
         except WebSocketDisconnect:
             return
@@ -119,7 +110,15 @@ class RealtimeSession:
             segments.append(segment)
             await self.websocket.send_json(event("llm.segment", session_id=self.session_id, text=segment))
 
-        tts = StreamingTtsAdapter(sample_rate=self.sample_rate, voice=self.voice, mode="mock")
+        tts_mode = "mock" if self.settings.mock_mode else "omnivoice"
+        tts = StreamingTtsAdapter(
+            sample_rate=self.sample_rate,
+            voice=self.voice,
+            mode=tts_mode,
+            tts_url=self.settings.tts_url,
+            model=self.settings.tts_model,
+            timeout_s=self.settings.request_timeout_s,
+        )
         async for item in tts.stream(segments):
             if isinstance(item, bytes):
                 if self._first_audio_ms is None:
