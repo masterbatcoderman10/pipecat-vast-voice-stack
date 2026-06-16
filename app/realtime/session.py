@@ -8,7 +8,10 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from app.config import Settings
 from app.realtime.protocol import error, event
-from app.utils.audio import generate_tone_wav
+from app.realtime.stt_stream import StreamingSttAdapter
+from app.realtime.text_segmenter import TextSegmenter
+from app.realtime.tts_stream import StreamingTtsAdapter
+from app.realtime.vad import EnergyVadAdapter
 
 
 class RealtimeSession:
@@ -27,10 +30,11 @@ class RealtimeSession:
         self.channels = 1
         self.encoding = "pcm_s16le"
         self.voice: str | None = None
-        self._speech_started = False
         self._audio_bytes = 0
         self._session_started_at = time.perf_counter()
         self._first_audio_ms: int | None = None
+        self.vad = EnergyVadAdapter()
+        self.stt = StreamingSttAdapter(mode="mock" if settings.mock_mode else "local")
 
     async def run(self) -> None:
         await self.websocket.accept()
@@ -73,6 +77,9 @@ class RealtimeSession:
                 continue
             if "text" in message:
                 payload = json.loads(message["text"])
+                if payload.get("type") == "response.cancel":
+                    await self._handle_cancel()
+                    return
                 if payload.get("type") == "audio.input.commit":
                     await self._handle_commit()
                     return
@@ -85,35 +92,42 @@ class RealtimeSession:
         if not chunk:
             return
         self._audio_bytes += len(chunk)
-        if not self._speech_started:
-            self._speech_started = True
+        for vad_event in self.vad.feed_pcm(chunk):
             await self.websocket.send_json(
-                event(
-                    "vad.speech_start",
-                    session_id=self.session_id,
-                    audio_bytes=self._audio_bytes,
-                )
+                event(f"vad.{vad_event}", session_id=self.session_id, audio_bytes=self._audio_bytes)
             )
+        self.stt.feed_pcm(chunk)
 
     async def _handle_commit(self) -> None:
-        if self._speech_started:
-            await self.websocket.send_json(event("vad.speech_stop", session_id=self.session_id, audio_bytes=self._audio_bytes))
+        for vad_event in self.vad.commit():
+            await self.websocket.send_json(
+                event(f"vad.{vad_event}", session_id=self.session_id, audio_bytes=self._audio_bytes)
+            )
 
-        transcript = "mock realtime transcript"
-        response_text = "Mock realtime response."
+        transcript = self.stt.commit().text
         await self.websocket.send_json(event("stt.final", session_id=self.session_id, text=transcript))
         await self.websocket.send_json(event("llm.start", session_id=self.session_id))
-        await self.websocket.send_json(event("llm.token", session_id=self.session_id, text=response_text))
-        await self.websocket.send_json(event("llm.segment", session_id=self.session_id, text=response_text))
-        await self.websocket.send_json(event("tts.start", session_id=self.session_id, voice=self.voice))
 
-        audio = generate_tone_wav(duration_s=0.1, sample_rate=self.sample_rate)
-        self._first_audio_ms = int((time.perf_counter() - self._session_started_at) * 1000)
-        await self.websocket.send_json(
-            event("tts.audio_start", session_id=self.session_id, mime_type="audio/wav", encoding="wav")
-        )
-        await self.websocket.send_bytes(audio)
-        await self.websocket.send_json(event("tts.audio_done", session_id=self.session_id, bytes=len(audio)))
+        segmenter = TextSegmenter(max_chars=80)
+        segments: list[str] = []
+        for token in ["Mock realtime ", "response."]:
+            await self.websocket.send_json(event("llm.token", session_id=self.session_id, text=token))
+            for segment in segmenter.feed(token):
+                segments.append(segment)
+                await self.websocket.send_json(event("llm.segment", session_id=self.session_id, text=segment))
+        for segment in segmenter.flush():
+            segments.append(segment)
+            await self.websocket.send_json(event("llm.segment", session_id=self.session_id, text=segment))
+
+        tts = StreamingTtsAdapter(sample_rate=self.sample_rate, voice=self.voice, mode="mock")
+        async for item in tts.stream(segments):
+            if isinstance(item, bytes):
+                if self._first_audio_ms is None:
+                    self._first_audio_ms = int((time.perf_counter() - self._session_started_at) * 1000)
+                await self.websocket.send_bytes(item)
+                continue
+            payload = {**item, "session_id": self.session_id}
+            await self.websocket.send_json(payload)
         await self.websocket.send_json(
             event(
                 "response.done",
@@ -124,3 +138,8 @@ class RealtimeSession:
                 },
             )
         )
+
+    async def _handle_cancel(self) -> None:
+        self.vad.reset()
+        self.stt.reset()
+        await self.websocket.send_json(event("response.cancelled", session_id=self.session_id))

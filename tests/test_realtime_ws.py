@@ -58,6 +58,7 @@ def test_realtime_websocket_mock_contract(monkeypatch, tmp_path):
         "stt.final",
         "llm.start",
         "llm.token",
+        "llm.token",
         "llm.segment",
         "tts.start",
         "tts.audio_start",
@@ -74,3 +75,48 @@ def test_realtime_websocket_mock_contract(monkeypatch, tmp_path):
     assert "timings" in done_event
     assert "first_audio_ms" in done_event["timings"]
     assert isinstance(done_event["timings"]["first_audio_ms"], int)
+
+
+def test_realtime_websocket_response_cancel(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+
+    with client.websocket_connect("/v2/realtime/ws") as ws:
+        ws.send_text(
+            json.dumps(
+                {
+                    "type": "session.start",
+                    "session_id": "cancel-session",
+                    "sample_rate": 16000,
+                    "channels": 1,
+                    "encoding": "pcm_s16le",
+                }
+            )
+        )
+        assert ws.receive_json()["type"] == "session.ready"
+
+        ws.send_bytes(b"\x01\x00" * 320)
+        assert ws.receive_json()["type"] == "vad.speech_start"
+        ws.send_text(json.dumps({"type": "response.cancel"}))
+
+        cancelled = ws.receive_json()
+        assert cancelled["type"] == "response.cancelled"
+        assert cancelled["session_id"] == "cancel-session"
+
+
+def test_realtime_health_contract(monkeypatch, tmp_path):
+    client = make_client(monkeypatch, tmp_path)
+
+    response = client.get("/health/realtime")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "status": "ok",
+        "vad": "energy/mock",
+        "stt_streaming": "mock/local",
+        "llm_streaming": "mock/local",
+        "tts_streaming": "mock/sentence",
+        "audio_input": "pcm_s16le/16000/mono",
+        "audio_output": "audio/wav/mock-tone",
+        "mock_mode": True,
+    }

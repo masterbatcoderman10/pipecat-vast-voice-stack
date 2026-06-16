@@ -51,6 +51,21 @@ def health() -> dict:
     return {"status": "ok", "mock_mode": settings.mock_mode, "artifact_dir": str(settings.artifact_dir)}
 
 
+@app.get("/health/realtime")
+def realtime_health() -> dict:
+    mode = "mock" if settings.mock_mode else "local"
+    return {
+        "status": "ok",
+        "vad": f"energy/{mode}",
+        "stt_streaming": f"{mode}/local",
+        "llm_streaming": f"{mode}/local",
+        "tts_streaming": f"{mode}/sentence",
+        "audio_input": "pcm_s16le/16000/mono",
+        "audio_output": "audio/wav/mock-tone" if settings.mock_mode else "audio/wav/local",
+        "mock_mode": settings.mock_mode,
+    }
+
+
 @app.get("/v1/models")
 def models() -> dict:
     return {
