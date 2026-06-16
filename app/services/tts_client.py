@@ -28,9 +28,13 @@ class TtsClient:
         payload = {
             "model": self.settings.tts_model,
             "input": text,
-            "voice": voice or self.settings.voice_profile,
             "response_format": "wav",
         }
+        selected_voice = voice or self.settings.voice_profile
+        # OmniVoice rejects unknown profile names instead of falling back. Only send
+        # a voice when the caller explicitly provides a supported preset/profile.
+        if selected_voice and selected_voice.lower() not in {"default", "sylens"}:
+            payload["voice"] = selected_voice
         async with httpx.AsyncClient(timeout=self.settings.request_timeout_s) as client:
             resp = await client.post(f"{self.settings.tts_url}/v1/audio/speech", json=payload)
             resp.raise_for_status()
