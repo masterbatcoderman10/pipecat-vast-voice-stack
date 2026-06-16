@@ -1,20 +1,123 @@
 import { useRef, useState } from 'react';
 import { reduceEvent } from './protocol.js';
+import { createAudioWorkletStreamer, nextRealtimeWsUrl, RealtimeVoiceClient } from './realtimeClient.js';
 
-const wsUrl = import.meta.env.VITE_BACKEND_WS || 'ws://127.0.0.1:7860/v1/voice-turn/ws';
-const initialState = () => ({ status: 'idle', transcript: '', assistantText: '', timings: null, audio: null, error: null });
+const legacyWsUrl = import.meta.env.VITE_BACKEND_WS || 'ws://127.0.0.1:7860/v1/voice-turn/ws';
+const realtimeWsUrl = nextRealtimeWsUrl(import.meta.env.VITE_BACKEND_WS);
+const initialState = () => ({
+  status: 'idle',
+  transcript: '',
+  interimTranscript: '',
+  assistantText: '',
+  segments: [],
+  currentSegment: null,
+  timings: null,
+  audio: null,
+  error: null,
+});
 
 export default function App() {
   const recorder = useRef(null);
   const chunks = useRef([]);
+  const realtimeClient = useRef(null);
+  const realtimeStream = useRef(null);
+  const realtimeStreamer = useRef(null);
+  const realtimeAudioContext = useRef(null);
   const [state, setState] = useState(initialState);
   const [audioUrl, setAudioUrl] = useState(null);
+  const [realtimeAudioUrls, setRealtimeAudioUrls] = useState([]);
   const [voice, setVoice] = useState('clone:sylens');
+  const [mode, setMode] = useState('realtime');
+
+  function resetAudio() {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    realtimeAudioUrls.forEach((url) => URL.revokeObjectURL(url));
+    setAudioUrl(null);
+    setRealtimeAudioUrls([]);
+  }
 
   async function start() {
+    if (mode === 'legacy') return startLegacy();
+    return startRealtime();
+  }
+
+  function stop() {
+    if (mode === 'legacy') return stopLegacy();
+    return stopRealtime();
+  }
+
+  async function startRealtime() {
+    resetAudio();
+    setState({ ...initialState(), status: 'connecting' });
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+      });
+      const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+      const audioContext = new AudioContextCtor({ sampleRate: 16000 });
+      const client = new RealtimeVoiceClient({
+        url: realtimeWsUrl,
+        voice,
+        onEvent: (event) => {
+          setState((current) => reduceEvent(current, event));
+          if (event.type === 'response.done' || event.type === 'error') {
+            cleanupRealtimeInput();
+            if (event.type === 'error') realtimeClient.current?.close();
+          }
+        },
+        onAudio: (data) => {
+          const blob = new Blob([data], { type: 'audio/wav' });
+          const url = URL.createObjectURL(blob);
+          setRealtimeAudioUrls((current) => [...current, url]);
+        },
+        onError: () => {
+          setState((current) => ({ ...current, status: 'error', error: 'websocket failed' }));
+        },
+      });
+
+      realtimeStream.current = stream;
+      realtimeAudioContext.current = audioContext;
+      realtimeClient.current = client;
+      await client.connect();
+      realtimeStreamer.current = await createAudioWorkletStreamer({
+        audioContext,
+        stream,
+        onChunk: (chunk) => client.sendPcmChunk(chunk),
+      });
+      setState((current) => ({ ...current, status: current.status === 'connecting' ? 'listening' : current.status }));
+    } catch (error) {
+      cleanupRealtimeInput();
+      realtimeClient.current?.close();
+      setState((current) => ({ ...current, status: 'error', error: error.message || 'microphone permission failed' }));
+    }
+  }
+
+  function stopRealtime() {
+    cleanupRealtimeInput();
+    realtimeClient.current?.commit();
+    setState((current) => ({ ...current, status: 'transcribing' }));
+  }
+
+  function cancelRealtime() {
+    cleanupRealtimeInput();
+    realtimeClient.current?.cancel();
+    realtimeClient.current?.close();
+    setState((current) => reduceEvent(current, { type: 'response.cancelled' }));
+  }
+
+  function cleanupRealtimeInput() {
+    realtimeStreamer.current?.stop();
+    realtimeStreamer.current = null;
+    realtimeStream.current?.getTracks().forEach((track) => track.stop());
+    realtimeStream.current = null;
+    realtimeAudioContext.current?.close?.();
+    realtimeAudioContext.current = null;
+  }
+
+  async function startLegacy() {
     chunks.current = [];
-    if (audioUrl) URL.revokeObjectURL(audioUrl);
-    setAudioUrl(null);
+    resetAudio();
     setState({ ...initialState(), status: 'recording' });
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -28,18 +131,18 @@ export default function App() {
     }
   }
 
-  function stop() {
+  function stopLegacy() {
     if (!recorder.current || recorder.current.state !== 'recording') return;
-    recorder.current.onstop = send;
+    recorder.current.onstop = sendLegacy;
     recorder.current.stop();
     recorder.current.stream.getTracks().forEach((track) => track.stop());
   }
 
-  async function send() {
+  async function sendLegacy() {
     setState((current) => ({ ...current, status: 'uploading' }));
     const mimeType = recorder.current?.mimeType || 'audio/webm';
     const blob = new Blob(chunks.current, { type: mimeType });
-    const ws = new WebSocket(wsUrl);
+    const ws = new WebSocket(legacyWsUrl);
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = async () => {
@@ -75,28 +178,50 @@ export default function App() {
     };
   }
 
+  const isRecording = state.status === 'recording' || state.status === 'listening' || state.status === 'user_speaking';
+
   return (
     <main>
       <h1>Pipecat Voice Note</h1>
+      <label>
+        Mode
+        <select value={mode} onChange={(event) => setMode(event.target.value)} disabled={isRecording}>
+          <option value="realtime">Realtime</option>
+          <option value="legacy">Legacy full-turn</option>
+        </select>
+      </label>
       <label>
         Voice
         <input value={voice} onChange={(event) => setVoice(event.target.value)} />
       </label>
       <p>Status: {state.status}</p>
-      <p>Backend: <code>{wsUrl}</code></p>
-      {state.status !== 'recording'
-        ? <button onClick={start}>Record</button>
-        : <button onClick={stop}>Stop + Send</button>}
+      <p>Backend: <code>{mode === 'realtime' ? realtimeWsUrl : legacyWsUrl}</code></p>
+      {!isRecording
+        ? <button onClick={start}>{mode === 'realtime' ? 'Start realtime' : 'Record'}</button>
+        : <button onClick={stop}>{mode === 'realtime' ? 'Commit turn' : 'Stop + Send'}</button>}
+      {mode === 'realtime' && isRecording && <button onClick={cancelRealtime}>Cancel</button>}
 
       <h2>Transcript</h2>
       <p>{state.transcript || '—'}</p>
+      {state.interimTranscript && <p>Interim: {state.interimTranscript}</p>}
 
       <h2>Assistant</h2>
       <p>{state.assistantText || '—'}</p>
+      {state.currentSegment && <p>Current segment: {state.currentSegment.text || state.currentSegment.id || '—'}</p>}
+      {state.segments?.length > 0 && (
+        <ul>
+          {state.segments.map((segment, index) => (
+            <li key={segment.id ?? index}>{segment.text || JSON.stringify(segment)}</li>
+          ))}
+        </ul>
+      )}
 
       {audioUrl && <audio controls autoPlay src={audioUrl} />}
+      {realtimeAudioUrls.map((url, index) => (
+        <audio key={url} controls autoPlay={index === realtimeAudioUrls.length - 1} src={url} />
+      ))}
       {state.timings && <pre>{JSON.stringify(state.timings, null, 2)}</pre>}
-      {state.audio && <p>Audio: {state.audio.bytes} bytes in {state.audio.elapsed_ms} ms</p>}
+      {state.audio && <p>Audio: {state.audio.bytes} bytes in {state.audio.elapsed_ms ?? '—'} ms</p>}
       {state.error && <p className="error">{state.error}</p>}
     </main>
   );
